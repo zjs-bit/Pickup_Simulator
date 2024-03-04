@@ -45,6 +45,51 @@ class RatingUpdater:
             loss = -(gameto*2)*tf.nn.sigmoid_cross_entropy_with_logits(labels=[outfrac],logits=[linear_term])
 
         return tape.gradient(loss,[t1tens,t2tens])
+    
+    def ctmc_grad(self,t1_off,t1_def,t2_off,t2_def,game_outcome):
+
+        t1_rate = np.exp(sum(t1_off)-sum(t2_def))
+        t2_rate = np.exp(sum(t2_off)-sum(t1_def))
+        prob_t1= t1_rate/(t1_rate+t2_rate)
+
+        prob_t1 =  tf.Variable([.55])
+
+        with tf.GradientTape() as tape:
+            p_win_t1 = self._ctmc_winprob(prob_t1,game_outcome)[(0,0)]
+
+            print(tape.gradient(p_win_t1,[prob_t1]))
+
+    def _ctmc_winprob(self,prob_t1,game_outcome):
+
+        result_dict = {tuple(game_outcome):1}
+
+        for i in range(game_outcome[0]+1):
+            for j in range(game_outcome[1]+1):
+
+                eval_i=game_outcome[0]-i
+                eval_j = game_outcome[1]-j
+
+                if (eval_i,eval_j) in result_dict.keys():
+                    continue
+
+                if (eval_i+1,eval_j) in  result_dict.keys():
+                    score1_next = result_dict[(eval_i+1,eval_j)]
+                else:
+                    score1_next = 0
+
+                if (eval_i,eval_j+1) in  result_dict.keys():
+                    score2_next = result_dict[(eval_i,eval_j+1)]
+                else:
+                    score2_next = 0
+
+                result_dict[(eval_i,eval_j)]=prob_t1*score1_next+(1-prob_t1)*score2_next
+
+        return result_dict
+
+
+        
+
+    
 
 
 r_updater = RatingUpdater()
@@ -59,5 +104,11 @@ t2games = [1,1]
 outcome = [10,7]
 
 
-r_updater.log_MOV_update(t1skill,t1games,t2skill,t2games,outcome)
-print(r_updater.log_MOV_update_tf(t1skill,t1games,t2skill,t2games,outcome))
+#r_updater.log_MOV_update(t1skill,t1games,t2skill,t2games,outcome)
+#print(r_updater.log_MOV_update_tf(t1skill,t1games,t2skill,t2games,outcome))
+
+p1  = .9
+
+print(r_updater._ctmc_winprob(p1,outcome))
+r_updater.ctmc_grad([4],[2],[3],[5],outcome)
+
