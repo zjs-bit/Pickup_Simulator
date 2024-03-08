@@ -10,6 +10,7 @@ class RatingUpdater:
         self.base_lr = base_learning_rate
         self.learn_decay = learn_decay
         self.C = C
+        self.max_margin = 7
     
     def _sigmoid(self,x):
         return 1/(1+np.exp(-x))
@@ -104,6 +105,52 @@ class RatingUpdater:
                 derivative_dict[(eval_i, eval_j)] = score1_next - score2_next + prob_t1*deriv1_next + (1-prob_t1)*deriv2_next
 
         return {"probs":result_dict, "grads":derivative_dict}
+    
+    def _mc_terminalprobs(self,prob_t1,winbytwo,gameto,max_score,**kwargs):
+
+        result_dict = {(0,0):1}
+        terminal_state = lambda i, j, win_by_two: max(i,j)>gameto and (not win_by_two or win_by_two & abs(i-j)>1)
+
+        for i in range(gameto+self.max_margin+1):
+            for j in range(i+1,gameto+self.max_margin+1-i):
+
+                #Fill the row 
+                if i-1 < 0 not in result_dict:
+                    result_dict[(i,j)]=(1-prob_t1)*result_dict[(i,j-1)]*terminal_state(i,j-1)
+                    result_dict[(j,i)]=prob_t1*result_dict[(j-1,i)]*terminal_state(j-1,i)
+                else: 
+                    result_dict[(i,j)]=prob_t1*result_dict[(i,j-1)]*terminal_state(i,j-1)+(1-prob_t1)*result_dict[(i-1,j)]*terminal_state(i-1,j)
+                    result_dict[(j,i)]=prob_t1*result_dict[(j-1,i)]*terminal_state(j-1,i)+(1-prob_t1)*result_dict[(j,i-1)]*terminal_state(j,i-1)
+        
+        return result_dict
+
+class BBallElo:
+
+    def __init__(self,base_learning_rate = 1.0, learn_decay = lambda n: np.log(n) + 1,C=10.0) -> None:
+        
+        self.base_lr = base_learning_rate
+        self.learn_decay = learn_decay
+        self.C = C
+        self.max_margin = 7
+
+    def pregame_terminal_probs(self,game):
+        pass
+
+    def pregame_win_prob(self,game):
+        pass
+
+    def pregame_expected_margin(self,game):
+        pass
+
+    def skill_updates(self,game):
+        pass 
+
+
+
+
+
+
+
 
 
 r_updater = RatingUpdater()
