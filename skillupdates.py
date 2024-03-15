@@ -1,51 +1,152 @@
 
 import tensorflow as tf
 import numpy as np
+import tensorflow_probability as tfp
+tfd = tfp.distributions
+from scipy.stats import binom
+from Game import Game
+from Player import Player
 
-class RatingUpdater:
+
+class EloModel:
+
+    def __init__(self,learning_rate:float = 1.0,C:float=10.0) -> None:
+        
+        self.learning_rate  = learning_rate
+        self.C = C
+
+    def learn_decay(self,games_played: int) -> float:
+        return np.log(games_played+1) + 1
+
+    def pregame_MOV_probs(self, game: Game):
+        pass
+
+    def pregame_win_prob(self, game: Game):
+        pass
+
+    def pregame_pred_MOV(self, game: Game):
+        pass
+
+    def postgame_likelihood(self, game: Game):
+        pass
+
+    def loss_function(self,t1x,t2x,game: Game):
+        return -tf.math.log(self.postgame_likelihood(t1x,t2x,game))
+    
+    def gradient_step(self,t1x: np.array,t2x: np.array ,game: Game):
+        t1x = tf.Variable(t1x)
+        t2x=tf.Variable(t2x)
+        with tf.GradientTape() as tape:
+            tape.watch([t1x,t2x])
+            loss = self.loss_function(t1x,t2x,game)
+        return [tm_grad.numpy() for tm_grad in tape.gradient(loss,[t1x,t2x])]
+    
+    def _normal_priors(self,t1_m,t1_var,t2_m, t2_var):
+        t1prior = tfd.Normal(loc=t1_m, scale=t1_var)
+        t2prior = tfd.Normal(loc=t2_m, scale=t2_var)
+
+        return t1prior, t2prior
+    
+    def _bayesian_update(self,t1x,t1var,t2x,t2var,optimizer: str,game: Game):
+        t1priors,t2priors = self._normal_priors(t1x,t1var,t2x,t2var)
+
+        @tf.function
+        def objective(tx1,tx2):
+            neglogprior = - (tf.reduce_sum(tf.math.log(t1priors.prob(t1x)))+tf.reduce_sum(tf.math.log(t2priors.prob(t2x))))
+            loss = self.loss_function(t1x,t2x) + neglogprior
+            return loss
+
+        @tf.function
+        def grad(tx1,tx2):
+            with tf.GradientTape() as tape1:
+                tape1.watch(tx1,tx2)
+                loss = objective(tx1,tx2)
+            return tape1.gradient(loss,tx1,tx2)
+        
+        @tf.function
+        def hess(tx1,tx2):
+            with tf.GradientTape() as tape2: 
+                tape2.watch(tx1,tx2)
+                g=grad(tx1,tx2)
+            h = tape2.jacobian(g,[t1x,t2x])
+
+            return h
+
+    def skill_updates_det(self,t1x,t2x,game: Game):
+        
+        print(self.gradient_step(t1x,t2x,game))
+        grads = self.gradient_step(t1x,t2x,game)
+        expt1  = [p.games_played for p in game.t_one]
+        expt2  = [p.games_played for p in game.t_two]
+        t1updates = [c-z * self.learning_rate/self.learn_decay(gp) for c, z,gp in zip(game.t1_ratings, grads[0],expt1)]
+        t2updates = [c-z * self.learning_rate/self.learn_decay(gp) for c, z,gp in zip(game.t2_ratings, grads[1],expt2)]
+
+        return t1updates, t2updates
+
+class Binom_MOV_Updater(EloModel):
 #Class for updating the ratings of pick-up game players after game results
 
-    def __init__(self,base_learning_rate = 1.0, learn_decay = lambda n: np.log(n) + 1,C=10.0) -> None:
-        
-        self.base_lr = base_learning_rate
-        self.learn_decay = learn_decay
-        self.C = C
-        self.max_margin = 7
+    def __init__(self,mode='deterministic',**kwargs) -> None:
+        super().__init__(**kwargs)
+
+        if mode not in ('deterministic','bayesian'):
+            raise ValueError('mode not in ("deterministic","bayesian")')
+        self.mode = mode
+        self.link = tf.math.sigmoid
     
     def _sigmoid(self,x):
         return 1/(1+np.exp(-x))
+    
+    def lin_term(self,t1x,t2x):
+        team_size = tf.shape(t1x).numpy()[0]
+        return (tf.reduce_sum(t1x) - tf.reduce_sum(t2x))/(team_size*self.C)
+    
+    def bin_p(self,t1x,t2x):
+        linterm = self.lin_term(t1x,t2x)
+        return self.link(linterm)
+    
+    def pregame_MOV_probs(self,t1x,t2x,game: Game):
+        p=self.bin_p(t1x,t2x)
+        t1_margin_probs = [binom.pmf(i,game.target_score*2,p) for i in range(game.target_score*2+1)]
+        t1_margins = [i - game.target_score for i in range(game.target_score*2+1)]
+        return {'Team1 margins': t1_margins,'Team1 margin probs': t1_margin_probs}
 
-    def log_MOV_update(self,t1_ratings,t1_gp,t2_ratings,t2_gp,game_outcome):
+    def pregame_win_prob(self,t1x,t2x,game:Game):
+        p=self.bin_p(t1x,t2x)
+        return 1-binom.cdf(game.target_score,game.target_score*2,p)
 
-        gameto = np.max(game_outcome)
-        t1marg = game_outcome[0]-game_outcome[1]+gameto
-        team_size = len(t1_ratings)
-        exp_marg = self._sigmoid((sum(t1_ratings)-sum(t2_ratings))/(team_size*self.C))*gameto*2
+    def pregame_pred_MOV(self,t1x,t2x,game :Game):
+        p=self.bin_p(t1x,t2x)
+        return p*game.target_score*2 - game.target_score
 
-        t1updates = (t1marg - exp_marg)/(team_size*self.C) * np.array([self.base_lr * 1/self.learn_decay(n) for n in t1_gp])
-        t2updates = (exp_marg - t1marg)/(team_size*self.C) *np.array([self.base_lr * 1/self.learn_decay(n) for n in t2_gp])
+    def postgame_likelihood(self,t1x,t2x,game):
+        p=self.bin_p(t1x,t2x)
+        adj_outcome = game.t1_margin+game.target_score
+        bin_x = max(0,min(adj_outcome,game.target_score*2))
+        return tfd.Binomial(total_count = game.target_score*2, probs = p).prob(bin_x)
+    
+    def loss_function(self,t1x,t2x,game: Game):
+        
+        linear_term = self.lin_term(t1x,t2x)
+        adj_outcome = max(0, min(game.t1_margin+game.target_score, game.target_score*2))
+        outfrac = float(adj_outcome/(game.target_score*2))
+        return (game.target_score*2)*tf.nn.sigmoid_cross_entropy_with_logits(labels=[outfrac],logits=[tf.cast(linear_term,dtype = tf.float32)])
 
-        print(t1updates)
+    def _gradient_step(self,t1x: np.array,t2x: np.array ,game: Game):
 
-        return {"t1updated": np.array(t1_ratings)+np.array(t1updates),
-                "t2updated": np.array(t2_ratings)+np.array(t2updates)}
+        linear_denom = game.team_size*self.C
+        adjoutcome = max(0, min(game.t1_margin+game.target_score, game.target_score*2))
+        exp_marg = self._sigmoid((sum(t1x)-sum(t2x))/linear_denom)*game.target_score*2
 
-    def log_MOV_update_tf(self,t1_ratings,t1_gp,t2_ratings,t2_gp,game_outcome):
+        t1grads = -[(adjoutcome - exp_marg)/linear_denom for i in range(game.team_size)]
+        t2grads = -[(exp_marg - adjoutcome)/linear_denom for i in range(game.team_size)]
 
-        gameto = max(game_outcome)
-        t1marg = game_outcome[0]-game_outcome[1]+gameto
-        team_size = float(len(t1_ratings))
-        outfrac = t1marg/(gameto*2)
+        return t1grads, t2grads
+    
+class ctmc_Updater(EloModel):
 
-        t1tens = tf.Variable(t1_ratings)
-        t2tens = tf.Variable(t2_ratings)
-
-        with tf.GradientTape() as tape:
-            linear_term  = (tf.reduce_sum(t1tens) - tf.reduce_sum(t2tens))/(team_size*self.C)
-            print(linear_term, outfrac)
-            loss = -(gameto*2)*tf.nn.sigmoid_cross_entropy_with_logits(labels=[outfrac],logits=[linear_term])
-
-        return tape.gradient(loss,[t1tens,t2tens])
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
     
     def ctmc_grad(self,t1_ratings,t2_ratings,t1score,t2score,winbytwo=True,gameto=-1):
 
@@ -124,7 +225,7 @@ class RatingUpdater:
         
         return result_dict
 
-class BBallElo:
+class Elo:
 
     def __init__(self,base_learning_rate = 1.0, learn_decay = lambda n: np.log(n) + 1,C=10.0) -> None:
         
@@ -150,26 +251,37 @@ class BBallElo:
 
 
 
+if __name__ == '__main__':
+
+    p1 = Player("Joe",base_rating=75.0)
+    p2 = Player("Bill",base_rating=60.0)
+
+    p1.assign_random_attributes()
+    p2.assign_random_attributes()
+
+    game = Game([p1],[p2])
+
+    game.add_result(11,8)
+
+    zt=tf.Variable([75.0])
+    z = tf.Variable([60.0])
+
+
+    log_elo = Binom_MOV_Updater()
+
+    print(log_elo.skill_updates_det(*game.player_ratings.values(),game))
+    
 
 
 
-r_updater = RatingUpdater()
-
-#example 1 on 1 game
-t1skill = [100.0,70.0]
-t2skill = [50.0,80.0]
-
-t1games = [1,1]
-t2games = [1,1]
-
-outcome = [10,7]
 
 
-#r_updater.log_MOV_update(t1skill,t1games,t2skill,t2games,outcome)
-#print(r_updater.log_MOV_update_tf(t1skill,t1games,t2skill,t2games,outcome))
 
-p1  = .55
 
-#print(r_updater._ctmc_winprob(p1,10,7))
-r_updater.ctmc_grad([4.0],[2.0],10,7)
+
+
+
+
+
+
 
