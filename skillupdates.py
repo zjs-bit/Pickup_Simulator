@@ -10,25 +10,63 @@ from Player import Player
 
 class EloModel:
 
-    def __init__(self,learning_rate:float = 1.0,C:float=10.0) -> None:
+    def __init__(self,learning_rate:float = 1.0,C:float=10.0,wb2_score_buffer: int = 5) -> None:
         
         self.learning_rate  = learning_rate
         self.C = C
+        self.wb2_score_buffer = wb2_score_buffer
 
     def learn_decay(self,games_played: int) -> float:
         return np.log(games_played+1) + 1
+    
+    def reachable_states(self,game: Game) -> set:
+
+        def reachable(t1scr,t2scr):
+            return max(t1scr,t2scr)<game.target_score \
+                or (max(t1scr,t2scr)>game.target_score and (not game.win_by_two or game.win_by_two & abs(t1scr-t2scr)<=2))
+
+        if game.win_by_two:
+            max_score = game.target_score + self.wb2_score_buffer
+        else: 
+            max_score = game.target_score + game.max_score_increment - 1 
+
+        return set([(i,j) for i in range(max_score) for j in range(max_score) if reachable(i,j)])
+    
+    def likelihood(self,t1Score: int,t2score: int, game: Game) -> float:
+        """ Computes the likelihood of observing outcome t1Score, t2Score given the teams
+        and settings stored in game. Method must be defined in subclass.
+        """
+        pass
+
+    def pregame_outcome_probs(self,game: Game) -> dict:
+        """Computes a dictionary containing the probability of potential outcomes for the 
+        matchup in "game" using self.likelihood()
+        """
+        outcomes = self.reachable_states(game)
+        return {outcome:self.likelihood(*outcome,game) for outcome in outcomes}
 
     def pregame_MOV_probs(self, game: Game):
-        pass
+        movs = [i  for i in range(-1*game.target_score-(game.max_score_increment-1),game.target_score+(game.max_score_increment-1))]
+        mov_probs ={}
 
     def pregame_win_prob(self, game: Game):
-        pass
+        """Returns the pregame probability that team 1 will win"""
+        outcome_probs = self.pregame_outcome_probs(game)
+        winning_outcomes = dict(filter(lambda res: res[0] - res[1] > 0),outcome_probs.keys())
+        return sum(winning_outcomes.values)
 
-    def pregame_pred_MOV(self, game: Game):
+    def pregame_predicted_MOV(self, game: Game):
         pass
 
     def postgame_likelihood(self, game: Game):
-        pass
+        """Returns the likelihood of the observed outcome in game, if available"""
+
+        if hasattr(game,"t1_score") and hasattr(game,"t1_score"):
+            return self.likelihood(game.t1_score,game.t2_score,game)
+        
+        else: 
+            raise AttributeError("game object does not have an observed result assigned. \
+                                 Use game.add_result to assign an outcome")
 
     def loss_function(self,t1x,t2x,game: Game):
         return -tf.math.log(self.postgame_likelihood(t1x,t2x,game))
@@ -269,7 +307,7 @@ if __name__ == '__main__':
 
     log_elo = Binom_MOV_Updater()
 
-    print(log_elo.skill_updates_det(*game.player_ratings.values(),game))
+    print(log_elo.pregame_MOV_probs(zt,z,game))
     
 
 
