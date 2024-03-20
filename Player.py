@@ -26,8 +26,11 @@ class Player:
         self.games_played=games_played
         self.base_rating = base_rating
         self.base_sd  = base_sd
+
+        #These could be vectors if more than one player characteristic is tracked by Elo (e.g., offense and defense)
         self.current_rating = base_rating
         self.current_sd = base_sd
+        
 
         if 'height' in kwargs:
             self.height  = kwargs['height']

@@ -34,10 +34,19 @@ class Game:
         self.player_ratings = {"t1_ratings": self.t1_ratings,
                 "t2_ratings": self.t2_ratings}
 
-    def add_result(self,t1score: int,t2score: int):
+    def add_result(self,t1score: int,t2score: int,**kwargs):
+
+        #The final score for each team is always recorded
         self.t1_score = t1score
         self.t2_score = t2score
-        self.t1_margin = t1score - t2score
+        self.t1_MOV = t1score - t2score
+        self.outcome = (t1score,t2score)
+
+        #Store results in a generic dictionary for use by elo methods
+        self.result={}
+        self.result['reachable_state'] = kwargs
+        self.result['MOV'] = self.t1_MOV
+        self.result['Outcome'] = self.outcome
 
     
 

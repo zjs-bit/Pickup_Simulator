@@ -6,80 +6,102 @@ tfd = tfp.distributions
 from scipy.stats import binom
 from Game import Game
 from Player import Player
+import pandas as pd
+from functools import lru_cache
 
 
 class EloModel:
-
-    def __init__(self,learning_rate:float = 1.0,C:float=10.0,wb2_score_buffer: int = 5) -> None:
+    def __init__(self,
+                 learning_rate:float = 1.0,
+                 C:float=10.0,
+                 score_buffer: int = 5,
+                 mode = "deterministic") -> None:
         
         self.learning_rate  = learning_rate
         self.C = C
-        self.wb2_score_buffer = wb2_score_buffer
+        self.score_buffer = score_buffer
+        if mode not in ('deterministic','bayesian'):
+            raise ValueError('mode not in ("deterministic","bayesian")')
+        self.mode = mode
 
     def learn_decay(self,games_played: int) -> float:
         return np.log(games_played+1) + 1
     
-    def reachable_states(self,game: Game) -> set:
-
-        def reachable(t1scr,t2scr):
-            return max(t1scr,t2scr)<game.target_score \
-                or (max(t1scr,t2scr)>game.target_score and (not game.win_by_two or game.win_by_two & abs(t1scr-t2scr)<=2))
-
-        if game.win_by_two:
-            max_score = game.target_score + self.wb2_score_buffer
-        else: 
-            max_score = game.target_score + game.max_score_increment - 1 
-
-        return set([(i,j) for i in range(max_score) for j in range(max_score) if reachable(i,j)])
-    
-    def likelihood(self,t1Score: int,t2score: int, game: Game) -> float:
-        """ Computes the likelihood of observing outcome t1Score, t2Score given the teams
-        and settings stored in game. Method must be defined in subclass.
-        """
+    def reachable_states(self,game:Game)-> tuple:
+        """Returns the reachable states in a game. Defined in subclass"""
         pass
+
+    def is_terminal_state(self,reachable_state)->bool:
+        """Returns true if reachable_state is a terminal (game completed) state. Defined in subclass"""
+        pass
+
+    def _get_MOV(self,terminal_state) -> int:
+        pass
+
+    def _get_t1Win(self,terminal_state)-> bool:
+        pass
+
+    def likelihood(self,reachable_state,game:Game) -> float:
+        """Method returning the likelihood of observing the outcome of game  
+        game: Holds relevant data on the game;
+        outcome: a dictionary storing relevant information for a possible outcome of the game 
+        required for computing the likelihood
+        """
 
     def pregame_outcome_probs(self,game: Game) -> dict:
         """Computes a dictionary containing the probability of potential outcomes for the 
         matchup in "game" using self.likelihood()
         """
         outcomes = self.reachable_states(game)
-        return {outcome:self.likelihood(*outcome,game) for outcome in outcomes}
+        return self._pregame_outcome_probs_cached(outcomes)
+        
+    @lru_cache(maxsize=5)
+    def _pregame_outcome_probs_cached(self,outcomes)->dict:
+        return {outcome:self.likelihood(outcome,game) for outcome in outcomes}
 
-    def pregame_MOV_probs(self, game: Game):
-        movs = [i  for i in range(-1*game.target_score-(game.max_score_increment-1),game.target_score+(game.max_score_increment-1))]
-        mov_probs ={}
-
-    def pregame_win_prob(self, game: Game):
-        """Returns the pregame probability that team 1 will win"""
+    def pregame_MOV_probs(self, game: Game)->pd.DataFrame:
         outcome_probs = self.pregame_outcome_probs(game)
-        winning_outcomes = dict(filter(lambda res: res[0] - res[1] > 0),outcome_probs.keys())
-        return sum(winning_outcomes.values)
+        outprobs = {k:outcome_probs[k] for k in outcome_probs.keys() if self.is_terminal_state(k)}
+        print(outprobs)
+        predict_mov = pd.DataFrame.from_dict({'outcomes':outprobs.keys(),'prob':outprobs.values()})
+        predict_mov['MOV'] = predict_mov['outcomes'].apply(self._get_MOV)
+        return predict_mov.groupby('MOV').agg(MOV_prob=('prob',np.sum))
 
-    def pregame_predicted_MOV(self, game: Game):
-        pass
+    def pregame_win_prob(self, game: Game) -> float:
+        """Returns the pregame probability that team 1 will win"""
+        outprobs = dict(filter(self.pregame_outcome_probs(game),self.is_terminal_state))
+        return sum(dict(filter(outprobs,self._get_t1Win)).values())
+
+    def pregame_predicted_MOV(self, game: Game) -> pd.DataFrame:
+       MOV_tab =  self.pregame_MOV_probs(game)
+       return pd.sum(MOV_tab['MOV']*MOV_tab['prob'])
 
     def postgame_likelihood(self, game: Game):
-        """Returns the likelihood of the observed outcome in game, if available"""
+        """Returns the likelihood of the observed outcome in game, if available
 
-        if hasattr(game,"t1_score") and hasattr(game,"t1_score"):
-            return self.likelihood(game.t1_score,game.t2_score,game)
-        
+        game: Game object storing the players and setting for the game
+        game.result: stores a generic results dictionary storing the applicable outcomes observed
+        at the end of the game
+        """
+
+        if hasattr(game, 'result'):
+            return self.likelihood(game=game,**game.result)
         else: 
             raise AttributeError("game object does not have an observed result assigned. \
                                  Use game.add_result to assign an outcome")
 
-    def loss_function(self,t1x,t2x,game: Game):
-        return -tf.math.log(self.postgame_likelihood(t1x,t2x,game))
+    def loss_function(self,game: Game):
+        return -tf.math.log(self.postgame_likelihood(game))
     
-    def gradient_step(self,t1x: np.array,t2x: np.array ,game: Game):
-        t1x = tf.Variable(t1x)
-        t2x=tf.Variable(t2x)
+    def gradient_step(self,game: Game) -> list:
+        t1x = tf.Variable(game.t1_ratings)
+        t2x = tf.Variable(game.t2_ratings)
         with tf.GradientTape() as tape:
             tape.watch([t1x,t2x])
             loss = self.loss_function(t1x,t2x,game)
         return [tm_grad.numpy() for tm_grad in tape.gradient(loss,[t1x,t2x])]
     
-    def _normal_priors(self,t1_m,t1_var,t2_m, t2_var):
+    def _normal_priors(self,game: Game) -> tfp.distributions.Normal:
         t1prior = tfd.Normal(loc=t1_m, scale=t1_var)
         t2prior = tfd.Normal(loc=t2_m, scale=t2_var)
 
@@ -120,16 +142,69 @@ class EloModel:
         t2updates = [c-z * self.learning_rate/self.learn_decay(gp) for c, z,gp in zip(game.t2_ratings, grads[1],expt2)]
 
         return t1updates, t2updates
-
-class Binom_MOV_Updater(EloModel):
-#Class for updating the ratings of pick-up game players after game results
-
-    def __init__(self,mode='deterministic',**kwargs) -> None:
+    
+class OutcomeEloModel(EloModel):
+    def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
 
-        if mode not in ('deterministic','bayesian'):
-            raise ValueError('mode not in ("deterministic","bayesian")')
-        self.mode = mode
+    def final_scores(self,game: Game) -> set:
+
+        def reachable(t1scr,t2scr):
+               (max(t1scr,t2scr)>game.target_score and (not game.win_by_two or game.win_by_two & abs(t1scr-t2scr)<=2))
+
+        if game.win_by_two:
+            max_score = game.target_score + self.score_buffer
+        else: 
+            max_score = game.target_score + game.max_score_increment - 1 
+
+        return set([(i,j) for i in range(max_score) for j in range(max_score) if reachable(i,j)])
+    
+    def pregame_outcome_probs(self,game: Game) -> dict:
+        """Computes a dictionary containing the probability of potential outcomes for the 
+        matchup in "game" using self.likelihood()
+        """
+        outcomes = self.reachable_states(game)
+        return {outcome:self.likelihood(*outcome,game) for outcome in outcomes}
+
+    def pregame_MOV_probs(self, game: Game):
+        outcome_probs = self.pregame_outcome_probs(game)
+        predict_mov = pd.DataFrame(outcomes = outcome_probs.keys(), probs = outcome_probs.values())
+        predict_mov['MOV'] = predict_mov['outcomes'].apply(lambda scr1, scr2: scr1 - scr2)
+        return predict_mov.groupby('MOV').agg(MOV_prob=('probs',np.mean))
+
+    def pregame_win_prob(self, game: Game):
+        """Returns the pregame probability that team 1 will win"""
+        outcome_probs = self.pregame_outcome_probs(game)
+        winning_outcomes = dict(filter(lambda res: res[0] - res[1] > 0),outcome_probs.keys())
+        return sum(winning_outcomes.values)
+
+
+class MOVEloModel(EloModel):
+    def __init__(self, cap_MOV_at_target_scr = True, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.cap_MOV = cap_MOV_at_target_scr
+
+    def reachable_states(self,game: Game) -> list: 
+        if self.cap_MOV:
+            return (i - game.target_score for i in range(2*game.target_score+1))
+        else: 
+            return ( - game.target_score for i in range(2*(game.target_score+game.max_score_increment)-1))
+        
+    def is_terminal_state(self, reachable_state) -> bool:
+        return True
+    
+    def _get_MOV(self, terminal_state) -> int:
+        return terminal_state
+    
+    def _get_t1Win(self, terminal_state) -> bool:
+        return terminal_state > 0
+    
+
+class BinEloModel(MOVEloModel):
+#Class for updating the ratings of pick-up game players after game results
+
+    def __init__(self,**kwargs) -> None:
+        super().__init__(**kwargs)
         self.link = tf.math.sigmoid
     
     def _sigmoid(self,x):
@@ -143,27 +218,32 @@ class Binom_MOV_Updater(EloModel):
         linterm = self.lin_term(t1x,t2x)
         return self.link(linterm)
     
-    def pregame_MOV_probs(self,t1x,t2x,game: Game):
+    def likelihood(self, MOV: int, game: Game) -> float: #Restart here
+        p = self.bin_p(game.t1_ratings,game.t2_ratings)
+        MOV_trunc = min(abs(MOV),game.target_score)*np.sign(MOV)
+        return binom.pmf(MOV_trunc + game.target_score,game.target_score*2,p)
+    
+    def _pregame_MOV_probs(self,t1x,t2x,game: Game):
         p=self.bin_p(t1x,t2x)
         t1_margin_probs = [binom.pmf(i,game.target_score*2,p) for i in range(game.target_score*2+1)]
         t1_margins = [i - game.target_score for i in range(game.target_score*2+1)]
         return {'Team1 margins': t1_margins,'Team1 margin probs': t1_margin_probs}
 
-    def pregame_win_prob(self,t1x,t2x,game:Game):
+    def _pregame_win_prob(self,t1x,t2x,game:Game):
         p=self.bin_p(t1x,t2x)
         return 1-binom.cdf(game.target_score,game.target_score*2,p)
 
-    def pregame_pred_MOV(self,t1x,t2x,game :Game):
+    def _pregame_pred_MOV(self,t1x,t2x,game :Game):
         p=self.bin_p(t1x,t2x)
         return p*game.target_score*2 - game.target_score
 
-    def postgame_likelihood(self,t1x,t2x,game):
+    def _postgame_likelihood(self,t1x,t2x,game):
         p=self.bin_p(t1x,t2x)
         adj_outcome = game.t1_margin+game.target_score
         bin_x = max(0,min(adj_outcome,game.target_score*2))
         return tfd.Binomial(total_count = game.target_score*2, probs = p).prob(bin_x)
     
-    def loss_function(self,t1x,t2x,game: Game):
+    def _loss_function(self,t1x,t2x,game: Game):
         
         linear_term = self.lin_term(t1x,t2x)
         adj_outcome = max(0, min(game.t1_margin+game.target_score, game.target_score*2))
@@ -263,31 +343,6 @@ class ctmc_Updater(EloModel):
         
         return result_dict
 
-class Elo:
-
-    def __init__(self,base_learning_rate = 1.0, learn_decay = lambda n: np.log(n) + 1,C=10.0) -> None:
-        
-        self.base_lr = base_learning_rate
-        self.learn_decay = learn_decay
-        self.C = C
-        self.max_margin = 7
-
-    def pregame_terminal_probs(self,game):
-        pass
-
-    def pregame_win_prob(self,game):
-        pass
-
-    def pregame_expected_margin(self,game):
-        pass
-
-    def skill_updates(self,game):
-        pass 
-
-
-
-
-
 
 if __name__ == '__main__':
 
@@ -304,10 +359,12 @@ if __name__ == '__main__':
     zt=tf.Variable([75.0])
     z = tf.Variable([60.0])
 
+    log_elo = BinEloModel()
 
-    log_elo = Binom_MOV_Updater()
+    print(log_elo.reachable_states(game))
+    z=log_elo.pregame_outcome_probs(game)
 
-    print(log_elo.pregame_MOV_probs(zt,z,game))
+    print(log_elo.pregame_MOV_probs(game))
     
 
 
